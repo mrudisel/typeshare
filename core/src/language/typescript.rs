@@ -1,4 +1,4 @@
-use crate::rust_types::{RustType, RustTypeFormatError, SpecialRustType};
+use crate::rust_types::{RustType, RustTypeFormatError, SpecialRustType, RustEnumShared};
 use crate::{
     language::Language,
     rust_types::{RustEnum, RustEnumVariant, RustField, RustStruct, RustTypeAlias},
@@ -91,20 +91,55 @@ impl Language for TypeScript {
 
     fn write_struct(&self, w: &mut dyn Write, rs: &RustStruct) -> std::io::Result<()> {
         self.write_comments(w, 0, &rs.comments)?;
-        writeln!(
-            w,
-            "export interface {}{} {{",
-            rs.id.renamed,
-            (!rs.generic_types.is_empty())
-                .then(|| format!("<{}>", rs.generic_types.join(", ")))
-                .unwrap_or_default()
-        )?;
-
-        rs.fields
-            .iter()
-            .try_for_each(|f| self.write_field(w, f, rs.generic_types.as_slice()))?;
-
-        writeln!(w, "}}\n")
+        
+        if rs.fields.iter().any(|field| field.flattened) {
+            write!(w, "export type {}{} = ", 
+                rs.id.renamed,
+                (!rs.generic_types.is_empty())
+                    .then(|| format!("<{}>", rs.generic_types.join(", ")))
+                    .unwrap_or_default()
+            )?;
+            
+            for (i, flattened) in rs.fields.iter().filter(|f| f.flattened).enumerate() {
+                let ts_ty = self
+                    .format_type(&flattened.ty, &rs.generic_types)
+                    .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+                
+                if i > 0 {
+                    write!(w, " & {}", ts_ty)?;
+                } else {
+                    write!(w, "{}", ts_ty)?;
+                }
+            }
+            
+            if rs.fields.iter().any(|f| !f.flattened) {
+                writeln!(w, " & {{")?;
+                
+                for inline in rs.fields.iter().filter(|f| !f.flattened) {
+                    self.write_field(w, inline, &rs.generic_types)?;
+                }
+                
+                writeln!(w, "}};\n")
+            } else {
+                writeln!(w, ";\n")
+            }                
+        } else {
+            writeln!(
+                w,
+                "export interface {}{} {{",
+                rs.id.renamed,
+                (!rs.generic_types.is_empty())
+                    .then(|| format!("<{}>", rs.generic_types.join(", ")))
+                    .unwrap_or_default()
+            )?;
+            
+            rs.fields
+                .iter()
+                .filter(|field| !field.flattened)
+                .try_for_each(|f| self.write_field(w, f, rs.generic_types.as_slice()))?;
+    
+            writeln!(w, "}}\n")   
+        }   
     }
 
     fn write_enum(&self, w: &mut dyn Write, e: &RustEnum) -> std::io::Result<()> {
@@ -122,29 +157,39 @@ impl Language for TypeScript {
                     shared.id.renamed, generic_parameters
                 )?;
 
-                self.write_enum_variants(w, e)?;
+                self.write_enum_variants(w, e, None)?;
 
                 writeln!(w, "\n}}\n")
             }
-            RustEnum::Algebraic { shared, .. } => {
+            RustEnum::Adjacent { shared, tag_key, .. } | RustEnum::Algebraic { shared, tag_key, .. } => {
                 write!(
                     w,
                     "export type {}{} = ",
                     shared.id.renamed, generic_parameters
                 )?;
+                
+                let enum_tag_name = build_enum_tag_name(tag_key, shared);
 
-                self.write_enum_variants(w, e)?;
+                self.write_enum_variants(w, e, enum_tag_name.as_deref())?;
 
                 write!(w, ";")?;
                 writeln!(w)?;
-                writeln!(w)
+                writeln!(w)?;
+                
+                if let Some(enum_type_name) = enum_tag_name {
+                    write_enum_tag_type(w, &enum_type_name, shared)?;
+                    writeln!(w)?;
+                    writeln!(w)?;
+                }
+                
+                Ok(())
             }
         }
     }
 }
 
 impl TypeScript {
-    fn write_enum_variants(&self, w: &mut dyn Write, e: &RustEnum) -> std::io::Result<()> {
+    fn write_enum_variants(&self, w: &mut dyn Write, e: &RustEnum, enum_tag_ty: Option<&str>) -> std::io::Result<()> {
         match e {
             // Write all the unit variants out (there can only be unit variants in
             // this case)
@@ -164,40 +209,95 @@ impl TypeScript {
                 content_key,
                 shared,
             } => shared.variants.iter().try_for_each(|v| {
+                    writeln!(w)?;
+                    self.write_comments(w, 1, &v.shared().comments)?;
+                    let tag_value = enum_tag_ty.as_ref()
+                        .map(|tag_ty| format!("{tag_ty}.{}", v.shared().id.original))
+                        .unwrap_or_else(|| format!("\"{}\"", v.shared().id.renamed));
+    
+                    match v {
+                        RustEnumVariant::Unit(_) => write!(
+                            w,
+                            "\t| {{ {}: {}, {}?: undefined }}",
+                            tag_key, tag_value, content_key
+                        ),
+                        RustEnumVariant::Tuple { ty, .. } => {
+                            let r#type = self
+                                .format_type(ty, e.shared().generic_types.as_slice())
+                                .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+                            write!(
+                                w,
+                                "\t| {{ {}: {}, {}{}: {} }}",
+                                tag_key,
+                                tag_value,
+                                content_key,
+                                ty.is_optional().then(|| "?").unwrap_or_default(),
+                                r#type
+                            )
+                        }
+                        RustEnumVariant::AnonymousStruct { fields, .. } => {
+                            writeln!(
+                                w,
+                                "\t| {{ {}: {}, {}: {{",
+                                tag_key, tag_value, content_key
+                            )?;
+    
+                            fields.iter().try_for_each(|f| {
+                                self.write_field(w, f, e.shared().generic_types.as_slice())
+                            })?;
+    
+                            write!(w, "}}")?;
+                            write!(w, "}}")
+                        }
+                    }
+                }),
+            RustEnum::Adjacent {
+                tag_key,
+                shared,
+            } => shared.variants.iter().try_for_each(|v| {
                 writeln!(w)?;
                 self.write_comments(w, 1, &v.shared().comments)?;
+                let tag_value = enum_tag_ty.as_ref()
+                    .map(|tag_ty| format!("{tag_ty}.{}", v.shared().id.original))
+                    .unwrap_or_else(|| format!("\"{}\"", v.shared().id.renamed));
+
                 match v {
-                    RustEnumVariant::Unit(shared) => write!(
+                    RustEnumVariant::Unit(..) => write!(
                         w,
-                        "\t| {{ {}: \"{}\", {}?: undefined }}",
-                        tag_key, shared.id.renamed, content_key
+                        "\t| {{ {}: {} }}",
+                        tag_key, tag_value,
                     ),
-                    RustEnumVariant::Tuple { ty, shared } => {
+                    RustEnumVariant::Tuple { ty, .. } => {
                         let r#type = self
                             .format_type(ty, e.shared().generic_types.as_slice())
                             .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
-                        write!(
-                            w,
-                            "\t| {{ {}: \"{}\", {}{}: {} }}",
-                            tag_key,
-                            shared.id.renamed,
-                            content_key,
-                            ty.is_optional().then(|| "?").unwrap_or_default(),
-                            r#type
-                        )
+                            
+                        if ty.is_optional() { 
+                            write!(
+                                w,
+                                "\t| ({{ {}: {} }} & Partial<{}>)",
+                                tag_key,
+                                tag_value,    
+                                r#type,
+                            )        
+                        } else {
+                            write!(
+                                w,
+                                "\t| ({{ {}: {} }} & {})",
+                                tag_key,
+                                tag_value,    
+                                r#type,
+                            )               
+                        }
                     }
-                    RustEnumVariant::AnonymousStruct { fields, shared } => {
-                        writeln!(
-                            w,
-                            "\t| {{ {}: \"{}\", {}: {{",
-                            tag_key, shared.id.renamed, content_key
-                        )?;
+                    RustEnumVariant::AnonymousStruct { fields, .. } => {
+                        writeln!(w, "\t| {{")?;
+                        writeln!(w, " {}: {}, ", tag_key, tag_value)?;
 
                         fields.iter().try_for_each(|f| {
                             self.write_field(w, f, e.shared().generic_types.as_slice())
                         })?;
 
-                        write!(w, "}}")?;
                         write!(w, "}}")
                     }
                 }
@@ -216,13 +316,14 @@ impl TypeScript {
             .format_type(&field.ty, generic_types)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
         let optional = field.ty.is_optional() || field.has_default;
+        
         writeln!(
             w,
             "\t{}{}: {};",
             typescript_property_aware_rename(&field.id.renamed),
             optional.then(|| "?").unwrap_or_default(),
             ts_ty
-        )?;
+        )?;        
 
         Ok(())
     }
@@ -262,4 +363,41 @@ fn typescript_property_aware_rename(name: &str) -> String {
         return format!("\"{}\"", name);
     }
     name.to_string()
+}
+
+fn build_enum_tag_name(tag_name: &str, shared: &RustEnumShared) -> Option<String> {
+    let args = shared.decorators.get("enum_tag")?;
+    
+    match args.first() {
+        Some(name) if !name.is_empty() => Some(name.clone()),
+        _ => {
+            let mut enum_type_name = shared.id.renamed.clone();
+    
+            let mut tag_chars = tag_name.chars();
+            if let Some(c) = tag_chars.next() {
+                enum_type_name.extend(c.to_uppercase());        
+                enum_type_name.extend(tag_chars);
+            } else {
+                enum_type_name.push_str("Tag");
+            }
+            
+            Some(enum_type_name)
+        } 
+    } 
+}
+
+
+fn write_enum_tag_type(
+    w: &mut dyn Write,    
+    enum_name: &str, 
+    shared: &RustEnumShared
+) -> std::io::Result<()> {
+    writeln!(w, "export enum {} {{", enum_name)?;
+    
+    for variant in shared.variants.iter() {
+        let variant_shared = variant.shared();
+        
+        writeln!(w, "\t{} = \"{}\",", variant_shared.id.original, variant_shared.id.renamed)?;
+    }    
+    writeln!(w, "}}\n")    
 }

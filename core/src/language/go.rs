@@ -180,6 +180,7 @@ impl Go {
 
                 writeln!(w, "\n)")
             }
+            RustEnum::Adjacent { .. } => todo!(),
             RustEnum::Algebraic {
                 tag_key,
                 content_key,

@@ -70,6 +70,7 @@ pub struct RustField {
     /// Even if the field's type is not optional, we need to make it optional
     /// for the languages we generate code for.
     pub has_default: bool,
+    pub flattened: bool,
 }
 
 /// A Rust type.
@@ -425,6 +426,28 @@ pub enum RustEnum {
         /// Shared context for this enum.
         shared: RustEnumShared,
     },
+    /// An algebraic enum, with adjacently placed contents. 
+    ///
+    /// An example of such an enum:
+    ///
+    /// ```
+    /// struct AssociatedData { /* ... */ }
+    ///
+    /// enum AlgebraicEnum {
+    ///     UnitVariant,
+    ///     TupleVariant(AssociatedData),
+    ///     AnonymousStruct {
+    ///         field: String,
+    ///         another_field: bool,
+    ///     },    
+    /// }
+    /// ```
+    Adjacent {
+        /// The parsed value of the `#[serde(tag = "...")]` attribute
+        tag_key: String,
+        /// Shared context for this enum.
+        shared: RustEnumShared,
+    },
 }
 
 impl RustEnum {
@@ -433,6 +456,7 @@ impl RustEnum {
         match self {
             RustEnum::Unit(shared) => shared,
             RustEnum::Algebraic { shared, .. } => shared,
+            RustEnum::Adjacent { shared, .. } => shared,
         }
     }
 }

@@ -157,7 +157,7 @@ impl Language for Kotlin {
                     shared.id.renamed, generic_parameters
                 )?;
             }
-            RustEnum::Algebraic { shared, .. } => {
+            RustEnum::Algebraic { shared, .. } | RustEnum::Adjacent { shared, .. } => {
                 write!(
                     w,
                     "sealed class {}{} ",
@@ -177,6 +177,7 @@ impl Language for Kotlin {
 impl Kotlin {
     fn write_enum_variants(&self, w: &mut dyn Write, e: &RustEnum) -> std::io::Result<()> {
         match e {
+            RustEnum::Adjacent { .. } => todo!(),
             RustEnum::Unit(shared) => {
                 for v in shared.variants.iter() {
                     self.write_comments(w, 1, &v.shared().comments)?;

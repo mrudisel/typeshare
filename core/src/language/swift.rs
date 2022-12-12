@@ -347,6 +347,7 @@ impl Language for Swift {
         let enum_name =
             swift_keyword_aware_rename(&format!("{}{}", self.prefix, shared.id.renamed));
         let decs = match e {
+            RustEnum::Adjacent { .. } => todo!(),
             RustEnum::Unit(_) => determine_decorators(&["String", CODABLE], e),
             RustEnum::Algebraic { .. } => determine_decorators(&[CODABLE], e),
         };
@@ -439,6 +440,7 @@ impl Swift {
         let mut coding_keys = Vec::new();
 
         match e {
+            RustEnum::Adjacent { .. } => todo!(),
             RustEnum::Unit(shared) => {
                 for v in shared.variants.iter() {
                     let variant_name = v.shared().id.original.to_camel_case();

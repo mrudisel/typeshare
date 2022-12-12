@@ -152,12 +152,14 @@ fn parse_struct(s: &ItemStruct) -> Result<RustThing, ParseError> {
                     };
 
                     let has_default = serde_default(&f.attrs);
-
+                    let flattened = serde_flatten(&f.attrs);
+                    
                     Ok(RustField {
                         id: get_ident(f.ident.as_ref(), &f.attrs, &serde_rename_all),
                         ty,
                         comments: parse_comment_attrs(&f.attrs),
                         has_default,
+                        flattened,
                     })
                 })
                 .collect::<Result<_, ParseError>>()?;
@@ -283,15 +285,15 @@ fn parse_enum(e: &ItemEnum) -> Result<RustThing, ParseError> {
         let tag_key = maybe_tag_key.ok_or_else(|| ParseError::SerdeTagRequired {
             enum_ident: original_enum_ident.clone(),
         })?;
-        let content_key = maybe_content_key.ok_or_else(|| ParseError::SerdeContentRequired {
-            enum_ident: original_enum_ident.clone(),
-        })?;
-
-        Ok(RustThing::Enum(RustEnum::Algebraic {
-            tag_key,
-            content_key,
-            shared,
-        }))
+        
+        match maybe_content_key {
+            Some(content_key) => Ok(RustThing::Enum(RustEnum::Algebraic {
+                tag_key,
+                content_key,
+                shared,
+            })),
+            None => Ok(RustThing::Enum(RustEnum::Adjacent { tag_key, shared })),    
+        }
     }
 }
 
@@ -341,12 +343,14 @@ fn parse_enum_variant(
                     };
 
                     let has_default = serde_default(&f.attrs);
+                    let flattened = serde_flatten(&f.attrs);
 
                     Ok(RustField {
                         id: get_ident(f.ident.as_ref(), &f.attrs, &variant_serde_rename_all),
                         ty: field_type,
                         comments: parse_comment_attrs(&f.attrs),
                         has_default,
+                        flattened,
                     })
                 })
                 .collect::<Result<Vec<_>, ParseError>>()?,
@@ -489,6 +493,7 @@ fn get_decorators(attrs: &[syn::Attribute]) -> HashMap<String, Vec<String>> {
             // and we should just carry on
             for v in values {
                 if !v.ends_with(SUFFIX) {
+                    out.insert(v.to_owned(), vec![]);
                     continue;
                 }
 
@@ -509,10 +514,14 @@ fn get_decorators(attrs: &[syn::Attribute]) -> HashMap<String, Vec<String>> {
 
                     continue;
                 }
+                
+                if v.starts_with("enum_tag") {
+                    let name = remove_prefix_suffix(v, "enum_tag = \"", "\"").to_owned();
+                    out.insert("enum_tag".to_owned(), vec![name]);
+                }                
             }
         }
     }
-
     //return our hashmap mapping of language -> Vec<decorators>
     out
 }
@@ -543,6 +552,11 @@ fn serde_rename_all(attrs: &[syn::Attribute]) -> Option<String> {
 
 fn serde_default(attrs: &[syn::Attribute]) -> bool {
     const PREFIX: &str = "default";
+    attr_value("serde", attrs, PREFIX, "").is_some()
+}
+
+fn serde_flatten(attrs: &[syn::Attribute]) -> bool {
+    const PREFIX: &str = "flatten";
     attr_value("serde", attrs, PREFIX, "").is_some()
 }
 
